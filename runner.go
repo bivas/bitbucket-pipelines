@@ -2,21 +2,23 @@ package bitbucketpipelines
 
 import (
 	"bytes"
+	"fmt"
 	"io"
 	"log"
 	"os"
 	"os/exec"
 	"strings"
+	"time"
 )
 
 var data = `
-image: python:2.7
+image: busybox
 pipelines:
  default:
   - step:
      script:
-       - python --version
-       - python myScript.py
+       - ls
+       - ps
 `
 
 //PipelineRunner : create the pipelines runner
@@ -31,11 +33,11 @@ type runner struct {
 	hostPath string
 	command  *exec.Cmd
 	stdin    io.WriteCloser
-	stdout   io.ReadCloser
-	stderr   io.ReadCloser
+	output   bytes.Buffer
 }
 
 func (runner) commandRun(name string, args []string) *exec.Cmd {
+	log.Println("running command", name, args)
 	return exec.Command(name, args...)
 }
 
@@ -55,57 +57,67 @@ func (env runner) pullImage() {
 func (env *runner) runImage() {
 	log.Println("running image", env.image)
 	args := []string{"run",
-		"-it",
-		//"--rm",
+		"-i",
+		"--name=pipeline__runner__",
 		"--volume=" + env.hostPath + ":/repo",
-		"--workdir='/repo'",
-		"--memory=4g",
-		"--entrypoint=/bin/bash",
+		"--workdir=/repo",
+		"--entrypoint=/bin/sh",
 		env.image}
 	env.command = env.commandRun("docker", args)
+	log.Printf("%+v\n", env.command)
 	var e error
 	env.stdin, e = env.command.StdinPipe()
 	if e != nil {
 		log.Fatal(e)
 	}
-	env.stdout, e = env.command.StdoutPipe()
-	if e != nil {
-		log.Fatal(e)
-	}
-	env.stderr, e = env.command.StderrPipe()
-	if e != nil {
-		log.Fatal(e)
-	}
 	log.Println("setting up pipes")
-	if e := env.command.Start(); e != nil {
-		log.Fatal("error running docker", e)
-	}
+	log.Printf("%+v\n", env.command)
 }
 
-func (env runner) Setup() {
+func (env *runner) Setup() {
 	log.Println("setup runner")
-	env.pullImage()
+	//env.pullImage()
 	env.runImage()
 }
 
 func (env *runner) Close() {
 	log.Println("closing running")
 	env.stdin.Close()
-	env.stdout.Close()
-	env.stderr.Close()
 	env.command.Process.Kill()
 	env.command.Wait()
 }
 
 func (env *runner) Run(commands []string) (string, error) {
-	for _, command := range commands {
-		log.Println("running command", command)
-		io.WriteString(env.stdin, command+"/n")
+	go func() {
+		id, _ := env.commandOutput("docker", []string{"ps", "-aq", "--filter", "name=pipeline__runner__"})
+		for {
+			log.Println("Waiting for container to be available", id)
+			if id != "" {
+				break
+			}
+			time.Sleep(750 * time.Millisecond)
+			id, _ = env.commandOutput("docker", []string{"ps", "-aq", "--filter", "name=pipeline__runner__"})
+		}
+		for _, command := range commands {
+			output, err := env.commandOutput("docker", []string{"exec", "-i", "pipeline__runner__", command})
+			if err != nil {
+				log.Fatalln(output, err)
+			}
+			log.Println("command", command, "output", output)
+			env.output.WriteString(fmt.Sprintf("\n##### Running '%s' ==>\n", command))
+			env.output.WriteString(output)
+			env.commandOutput("docker", []string{"exec", "-i", "pipeline__runner__", "rm", "/.running"})
+		}
+
+	}()
+	defer env.stdin.Close()
+	io.WriteString(env.stdin, "touch /.running\n")
+	io.WriteString(env.stdin, "while [ -e /.running ]; do sleep 1; done; exit;\n")
+	out, err := env.command.CombinedOutput()
+	if err != nil {
+		log.Fatal(out, err)
 	}
-	var b bytes.Buffer
-	env.command.Stdout = &b
-	env.command.Stderr = &b
-	return string(b.Bytes()), nil
+	return string(env.output.Bytes()), err
 }
 
 //Run : run it!
@@ -118,12 +130,11 @@ func Run() {
 		image:    pipline.Image,
 		hostPath: path,
 	}
-	log.Printf("%+v", env)
 	defer env.Close()
 	env.Setup()
 	output, e := env.Run(pipline.Pipelines.Default[0].Step.Scripts)
 	if e != nil {
-		log.Fatal(e)
+		log.Fatal(output, e)
 	}
 	log.Println("output", output)
 }
