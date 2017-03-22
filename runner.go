@@ -9,6 +9,7 @@ import (
 	"os/exec"
 	"strings"
 	"time"
+	"errors"
 )
 
 var data = `
@@ -24,6 +25,7 @@ pipelines:
 
 const (
 	pipelineRunnerName = "pipeline__runner__"
+	bootTimeout = 30
 )
 
 //PipelineRunner : create the pipelines runner
@@ -38,6 +40,7 @@ type runner struct {
 	hostPath string
 	command  *exec.Cmd
 	output   bytes.Buffer
+	signal   chan error
 }
 
 func (runner) commandRun(name string, args []string) *exec.Cmd {
@@ -56,11 +59,25 @@ func (env runner) docker(args ...string) (string, error) {
 
 func (env runner) pullImage() {
 	log.Println("pulling image", env.image)
-	env.docker("docker", "pull", env.image)
+	out, e := env.docker("pull", env.image)
+	if e != nil {
+		log.Fatal("Error pulling image", env.image, e)
+		log.Fatal("Error message", out)
+	}
+}
+
+func (env runner) sendInitCommands() {
+	stdin, e := env.command.StdinPipe()
+	if e != nil {
+		log.Fatal("error setting up stdin", e)
+	}
+	defer stdin.Close()
+	io.WriteString(stdin, "touch /.running\n")
+	io.WriteString(stdin, "while [ -e /.running ]; do sleep 1; done; exit;\n")
 }
 
 func (env *runner) runImage() {
-	env.docker("rm", "-f", pipelineRunnerName)
+	env.cleanup()
 	log.Println("running image", env.image)
 	args := []string{"run",
 		"-i",
@@ -71,53 +88,74 @@ func (env *runner) runImage() {
 		"--entrypoint=/bin/sh",
 		env.image}
 	env.command = env.commandRun("docker", args)
+	env.sendInitCommands()
+	env.signal = make(chan error)
+	go func() {
+		out, err := env.command.CombinedOutput()
+		if err != nil {
+			env.signal <- fmt.Errorf("error combining output %s, %s", out, err)
+		} else {
+			env.signal <- err
+		}
+	}()
+}
+
+func (env runner) stopImage() {
+	env.docker("exec", "-i", pipelineRunnerName, "rm", "/.running")
+}
+
+func (env runner) cleanup() {
+	env.docker("rm", "-f", pipelineRunnerName)
 }
 
 func (env *runner) Setup() {
-	log.Println("setup runner")
+	log.Println("Setup runner")
 	env.pullImage()
 	env.runImage()
 }
 
 func (env *runner) Close() {
+	log.Println("Closing runner")
 	env.command.Process.Kill()
 	env.command.Wait()
+	env.cleanup()
+}
+
+func (env runner) waitForImage() {
+	filterPs := []string{"ps", "-aq", "--filter", "name=" + pipelineRunnerName}
+	id, _ := env.docker(filterPs...)
+	for i := 0; ; i++ {
+		if i > bootTimeout {
+			env.signal <- fmt.Errorf("Unable to start container after %d seconds", bootTimeout)
+		}
+		log.Println("Waiting for container to be available", id)
+		if id != "" {
+			break
+		}
+		time.Sleep(1 * time.Second)
+		id, _ = env.docker(filterPs...)
+	}
 }
 
 func (env *runner) Run(commands []string) (string, error) {
 	go func() {
-		filterPs := []string{"ps", "-aq", "--filter", "name=" + pipelineRunnerName}
-		id, _ := env.docker(filterPs...)
-		for {
-			log.Println("Waiting for container to be available", id)
-			if id != "" {
-				break
-			}
-			time.Sleep(1 * time.Second)
-			id, _ = env.docker(filterPs...)
-		}
+		time.Sleep(5 * time.Minute)
+		env.signal <- errors.New("Timeout trying to run commands")
+	}()
+	go func() {
+		env.waitForImage()
 		for _, command := range commands {
 			output, err := env.docker("exec", "-i", pipelineRunnerName, "/bin/sh", "-c", command)
 			if err != nil {
-				log.Fatalln("error running", command, output, err)
+				env.signal <- errors.New(fmt.Sprintln("error running", command, output, err))
 			}
 			env.output.WriteString(fmt.Sprintf("\n == Running '%s' ==>\n", command))
 			env.output.WriteString(output)
 			env.output.WriteByte('\n')
 		}
-		env.docker("exec", "-i", pipelineRunnerName, "rm", "/.running")
+		env.stopImage()
 	}()
-	stdin, e := env.command.StdinPipe()
-	if e != nil {
-		log.Fatal("error setting up stdin", e)
-	}
-	defer stdin.Close()
-	io.WriteString(stdin, "touch /.running\n")
-	io.WriteString(stdin, "while [ -e /.running ]; do sleep 1; done; exit;\n")
-	out, err := env.command.CombinedOutput()
-	if err != nil {
-		log.Fatal("error combining output", out, err)
-	}
+	err := <-env.signal
 	return string(env.output.Bytes()), err
 }
 
@@ -125,7 +163,6 @@ func (env *runner) Run(commands []string) (string, error) {
 func Run() {
 	reader := strings.NewReader(data)
 	pipline := ReadPipelineDef(reader)
-	log.Printf("%+v", pipline)
 	path, _ := os.Getwd()
 	env := &runner{
 		image:    pipline.Image,
