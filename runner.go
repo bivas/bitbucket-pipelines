@@ -12,14 +12,19 @@ import (
 )
 
 var data = `
-image: busybox
+image: python:alpine
 pipelines:
  default:
   - step:
      script:
        - ls
        - ps
+       - python --version
 `
+
+const (
+	pipelineRunnerName = "pipeline__runner__"
+)
 
 //PipelineRunner : create the pipelines runner
 type PipelineRunner interface {
@@ -32,12 +37,10 @@ type runner struct {
 	image    string
 	hostPath string
 	command  *exec.Cmd
-	stdin    io.WriteCloser
 	output   bytes.Buffer
 }
 
 func (runner) commandRun(name string, args []string) *exec.Cmd {
-	log.Println("running command", name, args)
 	return exec.Command(name, args...)
 }
 
@@ -47,75 +50,73 @@ func (runner) commandOutput(name string, args []string) (string, error) {
 	return strings.TrimSpace(string(out)), err
 }
 
+func (env runner) docker(args ...string) (string, error) {
+	return env.commandOutput("docker", args)
+}
+
 func (env runner) pullImage() {
 	log.Println("pulling image", env.image)
-	args := []string{"pull", env.image}
-	env.commandOutput("docker", args)
-	log.Println("pulled image", env.image)
+	env.docker("docker", "pull", env.image)
 }
 
 func (env *runner) runImage() {
+	env.docker("rm", "-f", pipelineRunnerName)
 	log.Println("running image", env.image)
 	args := []string{"run",
 		"-i",
-		"--name=pipeline__runner__",
-		"--volume=" + env.hostPath + ":/repo",
-		"--workdir=/repo",
+		"--rm",
+		"--name=" + pipelineRunnerName,
+		"--volume=" + env.hostPath + ":/wd",
+		"--workdir=/wd",
 		"--entrypoint=/bin/sh",
 		env.image}
 	env.command = env.commandRun("docker", args)
-	log.Printf("%+v\n", env.command)
-	var e error
-	env.stdin, e = env.command.StdinPipe()
-	if e != nil {
-		log.Fatal(e)
-	}
-	log.Println("setting up pipes")
-	log.Printf("%+v\n", env.command)
 }
 
 func (env *runner) Setup() {
 	log.Println("setup runner")
-	//env.pullImage()
+	env.pullImage()
 	env.runImage()
 }
 
 func (env *runner) Close() {
-	log.Println("closing running")
-	env.stdin.Close()
 	env.command.Process.Kill()
 	env.command.Wait()
 }
 
 func (env *runner) Run(commands []string) (string, error) {
 	go func() {
-		id, _ := env.commandOutput("docker", []string{"ps", "-aq", "--filter", "name=pipeline__runner__"})
+		filterPs := []string{"ps", "-aq", "--filter", "name=" + pipelineRunnerName}
+		id, _ := env.docker(filterPs...)
 		for {
 			log.Println("Waiting for container to be available", id)
 			if id != "" {
 				break
 			}
-			time.Sleep(750 * time.Millisecond)
-			id, _ = env.commandOutput("docker", []string{"ps", "-aq", "--filter", "name=pipeline__runner__"})
+			time.Sleep(1 * time.Second)
+			id, _ = env.docker(filterPs...)
 		}
 		for _, command := range commands {
-			output, err := env.commandOutput("docker", []string{"exec", "-i", "pipeline__runner__", command})
+			output, err := env.docker("exec", "-i", pipelineRunnerName, "/bin/sh", "-c", command)
 			if err != nil {
-				log.Fatalln(output, err)
+				log.Fatalln("error running", command, output, err)
 			}
-			log.Println("command", command, "output", output)
-			env.output.WriteString(fmt.Sprintf("\n##### Running '%s' ==>\n", command))
+			env.output.WriteString(fmt.Sprintf("\n == Running '%s' ==>\n", command))
 			env.output.WriteString(output)
-			env.commandOutput("docker", []string{"exec", "-i", "pipeline__runner__", "rm", "/.running"})
+			env.output.WriteByte('\n')
 		}
-
+		env.docker("exec", "-i", pipelineRunnerName, "rm", "/.running")
 	}()
-	defer env.stdin.Close()
-	io.WriteString(env.stdin, "touch /.running\n")
-	io.WriteString(env.stdin, "while [ -e /.running ]; do sleep 1; done; exit;\n")
+	stdin, e := env.command.StdinPipe()
+	if e != nil {
+		log.Fatal("error setting up stdin", e)
+	}
+	defer stdin.Close()
+	io.WriteString(stdin, "touch /.running\n")
+	io.WriteString(stdin, "while [ -e /.running ]; do sleep 1; done; exit;\n")
 	out, err := env.command.CombinedOutput()
 	if err != nil {
-		log.Fatal(out, err)
+		log.Fatal("error combining output", out, err)
 	}
 	return string(env.output.Bytes()), err
 }
@@ -136,5 +137,5 @@ func Run() {
 	if e != nil {
 		log.Fatal(output, e)
 	}
-	log.Println("output", output)
+	fmt.Println(output)
 }
