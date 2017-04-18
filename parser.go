@@ -22,10 +22,15 @@ type pipelines struct {
 	Bookmarks []config `yaml:"bookmarks,omitempty"`
 }
 
+type options struct {
+	Docker bool `yaml:"docker,omitempty"`
+}
+
 //PipelineDef : bitbucket pipelines definition
 type PipelineDef struct {
 	Image     string    `yaml:"image"`
 	Pipelines pipelines `yaml:"pipelines"`
+	Options   options   `yaml:"options,omitempty"`
 }
 
 //ReadPipelineDef : parse bitbucket pipeline input
