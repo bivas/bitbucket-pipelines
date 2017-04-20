@@ -2,6 +2,7 @@ package bitbucketpipelines
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -9,7 +10,6 @@ import (
 	"os/exec"
 	"strings"
 	"time"
-	"errors"
 )
 
 var data = `
@@ -21,11 +21,16 @@ pipelines:
        - ls
        - ps
        - python --version
+       - docker version
+options:
+ docker: true
 `
 
 const (
-	pipelineRunnerName = "pipeline__runner__"
-	bootTimeout = 30
+	pipelineRunnerName       = "pipeline__runner__"
+	pipelineRunnerDockerName = pipelineRunnerName + "docker"
+	dockerImage              = "docker:1.8-dind"
+	bootTimeout              = 30
 )
 
 //PipelineRunner : create the pipelines runner
@@ -36,18 +41,21 @@ type PipelineRunner interface {
 }
 
 type runner struct {
-	image    string
-	hostPath string
-	command  *exec.Cmd
-	output   bytes.Buffer
-	signal   chan error
+	image       string
+	hostPath    string
+	dockerMount bool
+	command     *exec.Cmd
+	output      bytes.Buffer
+	signal      chan error
 }
 
 func (runner) commandRun(name string, args []string) *exec.Cmd {
+	log.Println("Running (commandRun)", name, args)
 	return exec.Command(name, args...)
 }
 
 func (runner) commandOutput(name string, args []string) (string, error) {
+	log.Println("Running (commandOutput)", name, args)
 	cmd := exec.Command(name, args...)
 	out, err := cmd.CombinedOutput()
 	return strings.TrimSpace(string(out)), err
@@ -61,13 +69,38 @@ func (env runner) pullImage() {
 	log.Println("pulling image", env.image)
 	out, e := env.docker("pull", env.image)
 	if e != nil {
-		log.Fatal("Error pulling image", env.image, e)
-		log.Fatal("Error message", out)
+		log.Fatalf("Error pulling image %s %s\n", env.image, e)
+		log.Fatalf("Error message %s\n", out)
 	}
 }
 
-func (env runner) sendInitCommands() {
-	stdin, e := env.command.StdinPipe()
+func (env runner) runDockerDocker() {
+	if env.dockerMount {
+		log.Println("pulling", dockerImage)
+		out, e := env.docker("pull", dockerImage)
+		if e != nil {
+			log.Fatalf("Error pulling image %s %s\n", dockerImage, e)
+			log.Fatalf("Error message %s\n", out)
+		}
+		args := []string{"run",
+			"-d",
+			"--name=" + pipelineRunnerDockerName,
+			"--privileged",
+			dockerImage}
+		dockerCommand := env.commandRun("docker", args)
+		log.Println("running", dockerImage)
+		go func() {
+			out, err := dockerCommand.CombinedOutput()
+			if err != nil {
+				log.Fatalf("error combining output %s, %s", out, err)
+			}
+		}()
+		env.waitForImage(pipelineRunnerDockerName)
+	}
+}
+
+func (env runner) sendInitCommands(cmd *exec.Cmd) {
+	stdin, e := cmd.StdinPipe()
 	if e != nil {
 		log.Fatal("error setting up stdin", e)
 	}
@@ -85,10 +118,18 @@ func (env *runner) runImage() {
 		"--name=" + pipelineRunnerName,
 		"--volume=" + env.hostPath + ":/wd",
 		"--workdir=/wd",
-		"--entrypoint=/bin/sh",
-		env.image}
+		"--entrypoint=/bin/sh"}
+	if env.dockerMount {
+		env.runDockerDocker()
+		args = append(args,
+			[]string{
+				"--env=DOCKER_HOST=tcp://docker:2375",
+				"--link=" + pipelineRunnerDockerName + ":docker",
+			}...)
+	}
+	args = append(args, env.image)
 	env.command = env.commandRun("docker", args)
-	env.sendInitCommands()
+	env.sendInitCommands(env.command)
 	env.signal = make(chan error)
 	go func() {
 		out, err := env.command.CombinedOutput()
@@ -102,10 +143,17 @@ func (env *runner) runImage() {
 
 func (env runner) stopImage() {
 	env.docker("exec", "-i", pipelineRunnerName, "rm", "/.running")
+	if env.dockerMount {
+		env.docker("stop", pipelineRunnerDockerName)
+	}
 }
 
 func (env runner) cleanup() {
 	env.docker("rm", "-f", pipelineRunnerName)
+	if env.dockerMount {
+		env.docker("rm", "-f", pipelineRunnerDockerName)
+		os.Remove("")
+	}
 }
 
 func (env *runner) Setup() {
@@ -121,20 +169,21 @@ func (env *runner) Close() {
 	env.cleanup()
 }
 
-func (env runner) waitForImage() {
-	filterPs := []string{"ps", "-aq", "--filter", "name=" + pipelineRunnerName}
+func (env runner) waitForImage(image string) error {
+	filterPs := []string{"ps", "-aq", "--filter", "name=" + image}
 	id, _ := env.docker(filterPs...)
 	for i := 0; ; i++ {
 		if i > bootTimeout {
-			env.signal <- fmt.Errorf("Unable to start container after %d seconds", bootTimeout)
+			return fmt.Errorf("Unable to start container after %d seconds", bootTimeout)
 		}
-		log.Println("Waiting for container to be available", id)
+		log.Println("Waiting for container to be available", image, id)
 		if id != "" {
-			break
+			return nil
 		}
 		time.Sleep(1 * time.Second)
 		id, _ = env.docker(filterPs...)
 	}
+	return nil
 }
 
 func (env *runner) Run(commands []string) (string, error) {
@@ -143,7 +192,36 @@ func (env *runner) Run(commands []string) (string, error) {
 		env.signal <- errors.New("Timeout trying to run commands")
 	}()
 	go func() {
-		env.waitForImage()
+		e := env.waitForImage(pipelineRunnerName)
+		if e != nil {
+			env.signal <- e
+			return
+		}
+		if env.dockerMount {
+			if out1, e1 := env.docker([]string{
+				"cp",
+				pipelineRunnerDockerName + ":/usr/local/bin/docker",
+				"/tmp/",
+			}...); e1 != nil {
+				log.Fatal("copy from", out1, e1)
+			}
+			if out1, e1 := env.docker([]string{
+				"exec",
+				pipelineRunnerName,
+				"mkdir",
+				"-p",
+				"/usr/local/bin/",
+			}...); e1 != nil {
+				log.Fatal("copy to", out1, e1)
+			}
+			if out1, e1 := env.docker([]string{
+				"cp",
+				"/tmp/docker",
+				pipelineRunnerName + ":/usr/local/bin/",
+			}...); e1 != nil {
+				log.Fatal("copy to", out1, e1)
+			}
+		}
 		for _, command := range commands {
 			output, err := env.docker("exec", "-i", pipelineRunnerName, "/bin/sh", "-c", command)
 			if err != nil {
@@ -153,9 +231,10 @@ func (env *runner) Run(commands []string) (string, error) {
 			env.output.WriteString(output)
 			env.output.WriteByte('\n')
 		}
-		env.stopImage()
+		env.signal <- nil
 	}()
 	err := <-env.signal
+	env.stopImage()
 	return string(env.output.Bytes()), err
 }
 
@@ -165,8 +244,9 @@ func Run() {
 	pipline := ReadPipelineDef(reader)
 	path, _ := os.Getwd()
 	env := &runner{
-		image:    pipline.Image,
-		hostPath: path,
+		image:       pipline.Image,
+		hostPath:    path,
+		dockerMount: pipline.Options.Docker,
 	}
 	defer env.Close()
 	env.Setup()
