@@ -1,8 +1,13 @@
+sudo: required
+
+services:
+ - docker
+
 language: go
 
 go:
-    - 1.6
     - 1.7
+    - 1.8
     - tip
 
 go_import_path: github.com/bivas/bitbucket-pipelines

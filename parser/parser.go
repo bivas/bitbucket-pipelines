@@ -1,4 +1,4 @@
-package bitbucketpipelines
+package parser
 
 import (
 	"io"
