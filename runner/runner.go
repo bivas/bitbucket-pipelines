@@ -15,7 +15,7 @@ import (
 const (
 	pipelineRunnerName       = "pipeline__runner__"
 	pipelineRunnerDockerName = pipelineRunnerName + "docker"
-	dockerImage              = "docker:1.8-dind"
+	dockerImage              = "docker:17-dind"
 	bootTimeout              = 30
 )
 
@@ -175,10 +175,10 @@ func (env *inner) waitForImage(image string) error {
 			return fmt.Errorf("Unable to start container after %d seconds", bootTimeout)
 		}
 		log.Println("Waiting for container to be available", image, id)
+		time.Sleep(1 * time.Second)
 		if id != "" {
 			return nil
 		}
-		time.Sleep(1 * time.Second)
 		id, _ = env.docker(filterPs...)
 	}
 	return nil
