@@ -1,7 +1,13 @@
 
-BitBucket pipelines YAML parser [![Build Status](https://travis-ci.org/bivas/bitbucket-pipelines.svg?branch=master)](https://travis-ci.org/bivas/bitbucket-pipelines)
+[BitBucket Pipelines](https://confluence.atlassian.com/bitbucket/bitbucket-pipelines-792496469.html) YAML runner/parser [![Build Status](https://travis-ci.org/bivas/bitbucket-pipelines.svg?branch=master)](https://travis-ci.org/bivas/bitbucket-pipelines)
 
-Parse [BitBucket Pipelines](https://confluence.atlassian.com/bitbucket/bitbucket-pipelines-792496469.html) to Go structs.
+# Runner 
+
+See [Examples](examples/README.md)   
+
+# Parser
+
+Parse pipelines to Go structs.
 
 Using the following example:
 ```

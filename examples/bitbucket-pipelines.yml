@@ -1,0 +1,7 @@
+image: busybox
+pipelines:
+ default:
+  - step:
+     script:
+       - ls
+       - ps

@@ -23,7 +23,7 @@ pipelines:
 	if e := ioutil.WriteFile(yml.Name(), []byte(data), 0600); e != nil {
 		t.Fatal(e)
 	}
-	result := Run(yml.Name())
+	result := Run(yml.Name(), "")
 	assert.Equal(t, 0, result)
 }
 
@@ -47,6 +47,6 @@ options:
 	if e := ioutil.WriteFile(yml.Name(), []byte(data), 0600); e != nil {
 		t.Fatal(e)
 	}
-	result := Run(yml.Name())
+	result := Run(yml.Name(), "")
 	assert.Equal(t, 0, result)
 }
