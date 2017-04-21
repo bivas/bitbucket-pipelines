@@ -9,7 +9,7 @@ go:
 go_import_path: github.com/bivas/bitbucket-pipelines
 env:
   global:
-    - VERSION=$(echo TRAVIS_TAG)
+    - VERSION=$(echo $TRAVIS_TAG)
 before_deploy:
   - "GOOS=linux  GOARCH=amd64 go build -o bitbucket-pipelines-${VERSION}-linux-amd64"
   - "GOOS=darwin GOARCH=amd64 go build -o bitbucket-pipelines-${VERSION}-darwin-amd64"
