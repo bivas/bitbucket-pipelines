@@ -9,8 +9,8 @@ go:
 go_import_path: github.com/bivas/bitbucket-pipelines
 before_deploy:
   - mkdir -p release
-  - "GOOS=linux  GOARCH=amd64 go build -o release/bitbucket-pipelines-$TRAVIS_TAG-linux-amd64"
-  - "GOOS=darwin GOARCH=amd64 go build -o release/bitbucket-pipelines-$TRAVIS_TAG-darwin-amd64"
+  - "GOOS=linux  GOARCH=amd64 go build -o release/bitbucket-pipelines-${TRAVIS_TAG}-linux-amd64"
+  - "GOOS=darwin GOARCH=amd64 go build -o release/bitbucket-pipelines-${TRAVIS_TAG}-darwin-amd64"
 deploy:
   provider: releases
   api_key:
