@@ -1,9 +1,10 @@
-package bitbucketpipelines
+package runner
 
 import (
 	"bytes"
 	"errors"
 	"fmt"
+	"github.com/bivas/bitbucket-pipelines/parser"
 	"io"
 	"log"
 	"os"
@@ -12,20 +13,6 @@ import (
 	"time"
 )
 
-var data = `
-image: python:alpine
-pipelines:
- default:
-  - step:
-     script:
-       - ls
-       - ps
-       - python --version
-       - docker version
-options:
- docker: true
-`
-
 const (
 	pipelineRunnerName       = "pipeline__runner__"
 	pipelineRunnerDockerName = pipelineRunnerName + "docker"
@@ -33,14 +20,14 @@ const (
 	bootTimeout              = 30
 )
 
-//PipelineRunner : create the pipelines runner
+//PipelineRunner : create the pipelines inner
 type PipelineRunner interface {
 	Setup()
 	Run(commands []string) (string, error)
 	Close()
 }
 
-type runner struct {
+type inner struct {
 	image       string
 	hostPath    string
 	dockerMount bool
@@ -49,32 +36,32 @@ type runner struct {
 	signal      chan error
 }
 
-func (runner) commandRun(name string, args []string) *exec.Cmd {
+func (inner) commandRun(name string, args []string) *exec.Cmd {
 	log.Println("Running (commandRun)", name, args)
 	return exec.Command(name, args...)
 }
 
-func (runner) commandOutput(name string, args []string) (string, error) {
+func (inner) commandOutput(name string, args []string) (string, error) {
 	log.Println("Running (commandOutput)", name, args)
 	cmd := exec.Command(name, args...)
 	out, err := cmd.CombinedOutput()
 	return strings.TrimSpace(string(out)), err
 }
 
-func (env runner) docker(args ...string) (string, error) {
+func (env inner) docker(args ...string) (string, error) {
 	return env.commandOutput("docker", args)
 }
 
-func (env runner) pullImage() {
-	log.Println("pulling image", env.image)
+func (env inner) pullImage() {
+	ui.Info("Pulling image %s", env.image)
 	out, e := env.docker("pull", env.image)
 	if e != nil {
-		log.Fatalf("Error pulling image %s %s\n", env.image, e)
+		ui.Error("Error pulling image %s %s", env.image, e)
 		log.Fatalf("Error message %s\n", out)
 	}
 }
 
-func (env runner) runDockerDocker() {
+func (env inner) runDockerDocker() {
 	if env.dockerMount {
 		log.Println("pulling", dockerImage)
 		out, e := env.docker("pull", dockerImage)
@@ -99,7 +86,7 @@ func (env runner) runDockerDocker() {
 	}
 }
 
-func (env runner) sendInitCommands(cmd *exec.Cmd) {
+func (env inner) sendInitCommands(cmd *exec.Cmd) {
 	stdin, e := cmd.StdinPipe()
 	if e != nil {
 		log.Fatal("error setting up stdin", e)
@@ -109,9 +96,9 @@ func (env runner) sendInitCommands(cmd *exec.Cmd) {
 	io.WriteString(stdin, "while [ -e /.running ]; do sleep 1; done; exit;\n")
 }
 
-func (env *runner) runImage() {
+func (env *inner) runImage() {
 	env.cleanup()
-	log.Println("running image", env.image)
+	ui.Info("Running image %s", env.image)
 	args := []string{"run",
 		"-i",
 		"--rm",
@@ -141,14 +128,14 @@ func (env *runner) runImage() {
 	}()
 }
 
-func (env runner) stopImage() {
+func (env inner) stopImage() {
 	env.docker("exec", "-i", pipelineRunnerName, "rm", "/.running")
 	if env.dockerMount {
 		env.docker("stop", pipelineRunnerDockerName)
 	}
 }
 
-func (env runner) cleanup() {
+func (env inner) cleanup() {
 	env.docker("rm", "-f", pipelineRunnerName)
 	if env.dockerMount {
 		env.docker("rm", "-f", pipelineRunnerDockerName)
@@ -156,20 +143,20 @@ func (env runner) cleanup() {
 	}
 }
 
-func (env *runner) Setup() {
-	log.Println("Setup runner")
+func (env *inner) Setup() {
+	log.Println("Setup inner runner")
 	env.pullImage()
 	env.runImage()
 }
 
-func (env *runner) Close() {
-	log.Println("Closing runner")
+func (env *inner) Close() {
+	log.Println("Closing inner runner")
 	env.command.Process.Kill()
 	env.command.Wait()
 	env.cleanup()
 }
 
-func (env runner) waitForImage(image string) error {
+func (env inner) waitForImage(image string) error {
 	filterPs := []string{"ps", "-aq", "--filter", "name=" + image}
 	id, _ := env.docker(filterPs...)
 	for i := 0; ; i++ {
@@ -186,7 +173,7 @@ func (env runner) waitForImage(image string) error {
 	return nil
 }
 
-func (env *runner) Run(commands []string) (string, error) {
+func (env *inner) Run(commands []string) (string, error) {
 	go func() {
 		time.Sleep(5 * time.Minute)
 		env.signal <- errors.New("Timeout trying to run commands")
@@ -198,38 +185,15 @@ func (env *runner) Run(commands []string) (string, error) {
 			return
 		}
 		if env.dockerMount {
-			if out1, e1 := env.docker([]string{
-				"cp",
-				pipelineRunnerDockerName + ":/usr/local/bin/docker",
-				"/tmp/",
-			}...); e1 != nil {
-				log.Fatal("copy from", out1, e1)
-			}
-			if out1, e1 := env.docker([]string{
-				"exec",
-				pipelineRunnerName,
-				"mkdir",
-				"-p",
-				"/usr/local/bin/",
-			}...); e1 != nil {
-				log.Fatal("copy to", out1, e1)
-			}
-			if out1, e1 := env.docker([]string{
-				"cp",
-				"/tmp/docker",
-				pipelineRunnerName + ":/usr/local/bin/",
-			}...); e1 != nil {
-				log.Fatal("copy to", out1, e1)
-			}
+			env.copyDockerBin()
 		}
 		for _, command := range commands {
 			output, err := env.docker("exec", "-i", pipelineRunnerName, "/bin/sh", "-c", command)
 			if err != nil {
 				env.signal <- errors.New(fmt.Sprintln("error running", command, output, err))
 			}
-			env.output.WriteString(fmt.Sprintf("\n == Running '%s' ==>\n", command))
-			env.output.WriteString(output)
-			env.output.WriteByte('\n')
+			ui.Info(" == Running '%s' ==>", command)
+			ui.Output(output)
 		}
 		env.signal <- nil
 	}()
@@ -238,12 +202,43 @@ func (env *runner) Run(commands []string) (string, error) {
 	return string(env.output.Bytes()), err
 }
 
+func (env *inner) copyDockerBin() {
+	if out1, e1 := env.docker([]string{
+		"cp",
+		pipelineRunnerDockerName + ":/usr/local/bin/docker",
+		"/tmp/",
+	}...); e1 != nil {
+		log.Fatal("copy from", out1, e1)
+	}
+	if out1, e1 := env.docker([]string{
+		"exec",
+		pipelineRunnerName,
+		"mkdir",
+		"-p",
+		"/usr/local/bin/",
+	}...); e1 != nil {
+		log.Fatal("copy to", out1, e1)
+	}
+	if out1, e1 := env.docker([]string{
+		"cp",
+		"/tmp/docker",
+		pipelineRunnerName + ":/usr/local/bin/",
+	}...); e1 != nil {
+		log.Fatal("copy to", out1, e1)
+	}
+}
+
 //Run : run it!
-func Run() {
-	reader := strings.NewReader(data)
-	pipline := ReadPipelineDef(reader)
+func Run(yml string) int {
+	//reader := strings.NewReader(data)
+	reader, e := os.Open(yml)
+	if e != nil {
+		log.Println("Unable to read bitbucket-pipeline.yml")
+		return 1
+	}
+	pipline := parser.ReadPipelineDef(reader)
 	path, _ := os.Getwd()
-	env := &runner{
+	env := &inner{
 		image:       pipline.Image,
 		hostPath:    path,
 		dockerMount: pipline.Options.Docker,
@@ -252,7 +247,9 @@ func Run() {
 	env.Setup()
 	output, e := env.Run(pipline.Pipelines.Default[0].Step.Scripts)
 	if e != nil {
-		log.Fatal(output, e)
+		log.Println(output, e)
+		return 1
 	}
 	fmt.Println(output)
+	return 0
 }
