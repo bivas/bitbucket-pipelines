@@ -20,5 +20,6 @@ deploy:
   file:
       - "bitbucket-pipelines-$VERSION-darwin-amd64"
       - "bitbucket-pipelines-$VERSION-linux-amd64"
+  skip_cleanup: true
   on:
       tags: true
