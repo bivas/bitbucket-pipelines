@@ -201,7 +201,10 @@ func (env *inner) Run(commands []string) error {
 		for _, command := range commands {
 			output, err := env.docker("exec", "-i", pipelineRunnerName, "/bin/sh", "-c", command)
 			if err != nil {
-				env.signal <- errors.New(fmt.Sprintln("error running", command, output, err))
+				ui.Error(" == Running '%s' ==>", command)
+				ui.Output(output)
+				env.signal <- errors.New(fmt.Sprintln("command", command, output, err))
+				return
 			}
 			ui.Info(" == Running '%s' ==>", command)
 			ui.Output(output)
