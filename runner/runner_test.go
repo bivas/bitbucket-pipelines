@@ -2,8 +2,13 @@ package runner
 
 import (
 	"github.com/stretchr/testify/assert"
+	git "gopkg.in/src-d/go-git.v4"
 	"io/ioutil"
 	"testing"
+	"io"
+	"fmt"
+	"time"
+	"sort"
 )
 
 func TestRun(t *testing.T) {

@@ -1,8 +1,8 @@
-package runner
+package helper
 
 import "os"
 
-func exists(path string) bool {
+func Exists(path string) bool {
 	_, err := os.Stat(path)
 	if err == nil {
 		return true
@@ -13,7 +13,7 @@ func exists(path string) bool {
 	return true
 }
 
-func isFile(path string) bool {
+func IsFile(path string) bool {
 	info, err := os.Stat(path)
 	if err != nil {
 		return false
